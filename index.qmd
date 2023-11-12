@@ -1,0 +1,454 @@
+---
+title: "R Assessment for STC position at Global Poverty and Inequality Data Team"
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+Author: Nolan Young Zabala\
+Contact: [youngnolan1\@gmail.com](mailto:youngnolan1@gmail.com){.email}
+
+### Libraries
+
+```{r load_libraries}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(Hmisc)
+library(DT)
+```
+
+\*Note: package "Hmisc" is used for weighted mean and variance calculations. Like "dplyr", it contains the function "summarize" - so make sure to use "dplyr:summarize" to avoid confusing errors.
+
+### Basic Stats
+
+#### Data download
+
+```{r data_download_basic}
+tag      <- "202311081903"
+base_url <- "https://github.com/randrescastaneda/pub_data/raw/"
+data_url <- paste0(base_url, tag, "/data/Rtest1/")
+
+
+wdi_in1 <- readr::read_rds(paste0(data_url, "wdi_in1.Rds"))
+
+wdi_summ_solution <- readr::read_rds(paste0(data_url, "wdi_summ_out.Rds"))
+
+wdi_agg_solution <- readr::read_rds(paste0(data_url, "wdi_agg_out.Rds"))
+
+wdi_outliers_solution <- readr::read_rds(paste0(data_url, "wdi_outliers_out.Rds"))
+```
+
+#### 1. Summary statistics of GDP per capita by region
+
+```{r summarize_gdp_pc_by_region}
+# Create a new dataframe with population-weighted summary stats 
+wdi_summ_answer <- wdi_in1 %>%
+  rename(year = date) %>% 
+  group_by(region, year) %>% 
+  dplyr::summarize(N = n(),
+            Mean = wtd.mean(gdp, pop),
+            SD = sqrt(wtd.var(gdp, pop)),
+            Min = min(gdp),
+            Max = max(gdp)
+                   )
+
+# Display preview of answer
+datatable(wdi_summ_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE), 
+          style = "bootstrap",
+          class = "display responsive nowrap")%>% 
+  formatRound(columns=c("Mean", "SD", "Min", "Max"), digits=2)
+```
+
+#### 2. Aggregate stats
+
+First, define function "aggregate_stat", which takes the indicator of interest as an argument (string), and returns a long-format dataframe containing population-weighted summary statistics for the indicator of interest.
+
+```{r aggregate_stat}
+aggregate_stat <- function(indicator) {
+  
+  # Convert string representation of column name to symbol
+  xsym <- ensym(indicator)
+  
+  result <- wdi_in1 %>% 
+    # Compute summary stats
+    group_by(region, date) %>% 
+    dplyr::summarize(mean = wtd.mean({{xsym}}, pop),
+              sd = sqrt(wtd.var({{xsym}}, pop)),
+              min = min({{xsym}}, na.rm = TRUE),
+              max = max({{xsym}}, na.rm = TRUE),
+              median = median({{xsym}}, na.rm = TRUE),
+              pop = sum(pop, na.rm = TRUE)
+    ) %>%
+   
+    # Pivot summary df to long format
+    pivot_longer(cols = c(mean, sd, min, max, median),
+                 names_to = "estimate",
+                 values_to = indicator) %>% 
+   
+    # Move "estimate" column to front
+    select(estimate, everything())
+   
+  return(result)
+}
+```
+
+Now, apply "aggregate_stat" to the indicators of interest, generating a list of summary dataframes.
+
+```{r summary_dfs}
+agg_indicators <- c("lifeex", "gdp", "pov_intl")
+
+summary_dfs <- lapply(agg_indicators, aggregate_stat)
+```
+
+Finally, merge these dataframes into the final product.
+
+```{r merge_to_final}
+# Define the common columns to merge by
+common_columns <- c("estimate", "region", "date", "pop")
+
+# Use Reduce and merge to merge the dataframes in the list
+merged_dataframe <- Reduce(function(x, y) merge(x, y, by = common_columns, all = TRUE), summary_dfs)
+
+# Re-order rows according to levels argument below
+wdi_agg_answer <- merged_dataframe %>% 
+    mutate(estimate = factor(estimate, 
+                            levels = c("mean", "sd", "min", "max", "median"))) %>% 
+    arrange(estimate)
+
+# Display preview of answer
+datatable(wdi_agg_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE), 
+          style = "bootstrap",
+          class = "display responsive nowrap")%>% 
+  formatRound(columns=c("lifeex", "gdp", "pov_intl"), digits=2)
+```
+
+#### 3. Find outliers
+
+Define simple functions "hl"(high) and "ll" (low) which return a boolean depending on whether the submitted value is more than "sd_away" standard deviations away from the mean.
+
+```{r outlier_functions}
+# Specify standard deviation for outlier calculation here
+sd_away = 2.5
+
+hl <- function(value, mean, sd) {
+  (value - mean) > sd_away * sd
+}
+
+ll <- function(value, mean, sd) {
+  (value - mean) < -(sd_away * sd)
+}
+```
+
+Now, we specify our indicators of interest. Then, we perform the mean, sd, hl, and ll calculations across these indicators.
+
+```{r find_outliers}
+outlier_indicators <- c("lifeex", "gdp", "gini")
+
+wdi_outliers_answer <- wdi_in1 %>%
+  group_by(date) %>%
+  mutate_at(outlier_indicators, list(mean = ~wtd.mean(., pop), 
+                                     sd = ~sqrt(wtd.var(., pop)),
+                                     hl = ~hl(., wtd.mean(., pop), sqrt(wtd.var(., pop))),
+                                     ll = ~ll(., wtd.mean(., pop), sqrt(wtd.var(., pop)))))
+
+# Display preview of answer
+datatable(wdi_outliers_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE))
+```
+
+Plot the results for "lifeex".
+
+```{r plot_outliers}
+# Calculate confidence interval
+lifeex_conf_h <- wdi_outliers_answer$lifeex_mean + (sd_away * wdi_outliers_answer$lifeex_sd)
+lifeex_conf_l <- wdi_outliers_answer$lifeex_mean - (sd_away * wdi_outliers_answer$lifeex_sd)
+
+# Build chart
+ggplot(wdi_outliers_answer, aes(x = date, y = lifeex, color = region)) +
+  geom_ribbon(aes(ymin = lifeex_conf_l, ymax = lifeex_conf_h), fill = "grey", alpha = 0.3, linetype = 0) +
+  geom_line(aes(y = lifeex_mean), color = "blue") +
+  geom_point() +
+  labs(title = "Life Expectancy Over Time",
+       x = "Year",
+       y = "Life Expectancy") +
+  theme_minimal() +
+  theme(legend.position = c(0.5, 0.2),
+        legend.title = element_blank(),
+        legend.direction = "horizontal",
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+### Simulated data
+
+#### Data download
+
+```{r data_download_sim}
+l_svy <- readr::read_rds(paste0(data_url, "svy_sim_in1.Rds"))
+
+dt_pov_solution <- readr::read_rds(paste0(data_url, "dt_pov_out.Rds"))
+
+dt_lorenz_solution <- readr::read_rds(paste0(data_url, "dt_lorenz_out.Rds"))
+
+dt_gini_solution <- readr::read_rds(paste0(data_url, "dt_gini_out.Rds"))
+```
+
+#### 4. Poverty measures
+
+First, define three simple functions for calculating poverty headcount, gap, and severity measures for a given dataframe and poverty line.
+
+```{r poverty_measures}
+headcount <- function(df, pov_line) {
+  result <- sum(df$weight[df$income < pov_line]) / sum(df$weight)
+  return(result)
+}
+
+povgap <- function(df, pov_line) {
+  poor_pop <- sum(df$weight[df$income < pov_line])
+  total_pop <- sum(df$weight)
+  poor_avg <- wtd.mean(df$income[df$income < pov_line], df$weight[df$income < pov_line])
+  
+  result <- (poor_pop/total_pop) * ((pov_line - poor_avg)/pov_line)
+  return(result)
+}
+
+povseverity <- function(df, pov_line) {
+  poor_pop <- sum(df$weight[df$income < pov_line])
+  total_pop <- sum(df$weight)
+  
+  poor_severity <- sum(((pov_line - df$income[df$income < pov_line]) / pov_line)^2 * df$weight[df$income < pov_line])
+
+  result <- (poor_severity / total_pop)
+  return(result)
+}
+```
+
+Next, define a general function which uses the functions above to create a dataframe consolidating the poverty measure calculations.
+
+```{r calculate_poverty_measures}
+calculate_poverty_measures <- function(df, pov_line) {
+  result <- data.frame(
+    pov_line = pov_line,
+    headcount = headcount(df, pov_line),
+    povgap = povgap(df, pov_line),
+    povseverity = povseverity(df, pov_line)
+  )
+  
+  return(result)
+}
+```
+
+Now, define a list of poverty lines, and then apply the function created in the previous chunk to each yearly dataframe and poverty line.
+
+```{r dt_pov_answer}
+# Define poverty lines here
+pov_lines <- c(2.15, 3.65, 6.85)
+
+# Apply function to each dataframe and for each poverty line 
+pov_measures_list <- lapply(l_svy, function(year_df) {
+  lapply(pov_lines, function(pov_line) {
+    calculate_poverty_measures(year_df, pov_line)
+  })
+})
+
+# Combine the results into a single dataframe
+pov_measures_df <- do.call(rbind, do.call(c, pov_measures_list))
+
+# Create and clean year column
+dt_pov_answer <- pov_measures_df %>% 
+  tibble::rownames_to_column(var = "year") %>% 
+  mutate(year = as.numeric(substr(year, 2, 5))) %>% 
+  select(year, everything())
+
+# Display preview of answer
+datatable(dt_pov_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE), 
+          style = "bootstrap",
+          class = "display responsive nowrap")%>% 
+  formatRound(columns=c("headcount", "povgap", "povseverity"), digits=2)
+```
+
+Plotting poverty headcount over time.
+
+```{r}
+ggplot(dt_pov_answer, aes(x = year, y = headcount, group = pov_line, color = as.factor(pov_line))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Poverty Headcount Over Time",
+       x = "Year",
+       y = "Headcount") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+```
+
+#### 5. Lorenz curve
+
+Define the Lorenz function, which will calculate the cumulative welfare at each percentile for a given dataframe.
+
+```{r lorenz_func}
+lorenz <- function(df) {
+  
+  # Clean up yearly df and order by income
+  df <- df %>% 
+    rename(population = weight) %>% 
+    select(income, population) %>% 
+    arrange(income)
+
+  # Number of percentiles you want
+  num_percentiles <- 100
+  
+  # Calculate income thresholds for each percentile
+  percentile_thresholds <- wtd.quantile(df$income, probs = seq(0, 1, length.out = num_percentiles + 1), weights = df$population)
+  
+  percentile_thresholds <- percentile_thresholds[-1]
+  
+  # Empty Lorenz df
+  lorenz_df <- data.frame(cum_welfare = numeric(0))
+  
+  # Calculate cumulative share of income, weighted by pop, for each percentile
+  for (i in 1:num_percentiles) {
+    
+    # Subset data for the current percentile
+    subset_data <- df[df$income <= percentile_thresholds[i], ]
+    
+    # Calculate cum_welfare
+    cum_welfare <- sum(subset_data$income * subset_data$population) / sum(df$income * df$population)
+    
+    # Append to the Lorenz df
+    lorenz_df <- rbind(lorenz_df, data.frame(cum_welfare = cum_welfare))
+  }
+  
+  # Add welfare, cum_pop, and year columns
+  result <- lorenz_df %>% 
+    mutate(welfare = percentile_thresholds,
+           cum_population = seq(0.01, 1, by = 0.01)) %>% 
+    select(welfare, cum_welfare, cum_population)
+  
+  return(result)
+}
+```
+
+Apply the Lorenz function to the list of yearly dataframes.
+
+```{r lorenz_on_list}
+# Empty list for modified dataframes
+lorenz_list <- list()
+
+# Loop over the list of yearly dataframes
+for (i in seq_along(l_svy)) {
+  # Apply Lorenz function
+  lorenz_df <- lorenz(l_svy[[i]])
+  
+  # Add year column
+  year <- names(l_svy)[i]
+  lorenz_df$year <- as.numeric(substr(year, 2, 5))
+  
+  # Append to list
+  lorenz_list[[i]] <- lorenz_df
+}
+
+# Bind into single, final df
+dt_lorenz_answer <- bind_rows(lorenz_list)
+
+# Display preview of answer
+datatable(dt_lorenz_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE), 
+          style = "bootstrap",
+          class = "display responsive nowrap")%>% 
+  formatRound(columns=c("welfare", "cum_population"), digits=2)
+```
+
+Plot the Lorenz curves.
+
+```{r lorenz_plot}
+ggplot(dt_lorenz_answer, aes(x = cum_population, y = cum_welfare, group = year, color = as.factor(year))) +
+  geom_line() +
+  labs(title = "Lorenz Curves 2001-2010",
+       x = "Cumulative Population",
+       y = "Cumulative Welfare") +
+  theme_minimal() +
+  theme(legend.position = c(0.1, 0.6),
+        legend.direction = "vertical",
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+```
+
+#### 6. Gini coefficient
+
+Define function to calculate the Gini coefficient for a given dataframe.
+
+```{r}
+calculate_gini <- function (df) {
+  
+  # Arrange by income and normalize the weights
+  df <- df %>% 
+    arrange(income) %>% 
+    mutate(weight = weight/sum(weight))
+  
+  # Calculate cumulative sums
+  cum_weights <- cumsum(df$weight)
+  cum_inc_wtd <- cumsum(df$weight * df$income)
+  
+  # Normalize
+  n <- length(cum_inc_wtd)
+  cum_inc_wtd <- cum_inc_wtd/cum_inc_wtd[n]
+  
+  # Calculate coefficient
+  result <- sum(cum_inc_wtd[-1] * cum_weights[-n]) - sum(cum_inc_wtd[-n] * cum_weights[-1])
+  
+  return(result)
+}
+```
+
+Apply the Gini function to the list of yearly dataframes.
+
+```{r}
+# Empty list for coefficients
+gini_list <- list()
+
+for (i in seq_along(l_svy)) {
+  
+  # Apply Gini function
+  gini_coef <- calculate_gini(l_svy[[i]])
+  
+  # Get year
+  year <- names(l_svy)[i]
+  year <- as.numeric(substr(year, 2, 5))
+  
+  # Add to dataframe
+  gini_df <- data.frame(year = year, gini = gini_coef)
+  
+  # Append to list
+  gini_list[[i]] <- gini_df
+  
+}
+
+# Bind into single, final df
+dt_gini_answer <- bind_rows(gini_list)
+
+# Display preview of answer
+datatable(dt_gini_answer, 
+          options = list(pageLength = 10, lengthMenu = c(10, 20, 30), searching = TRUE), 
+          style = "bootstrap",
+          class = "display responsive nowrap")%>% 
+  formatRound(columns=c("gini"), digits=4)
+```
+
+Plot the Gini coefficients.
+
+```{r}
+ggplot(dt_gini_answer, aes(x = year, y = gini)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Gini Coefficients 2001-2010",
+       x = "Year",
+       y = "Gini Coefficient") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
