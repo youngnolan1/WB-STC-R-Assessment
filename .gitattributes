@@ -1,2 +1,2 @@
 * linguist-vendored
-*.R linguist-vendored=false
+*.qmd linguist-vendored=false
